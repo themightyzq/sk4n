@@ -1,0 +1,21 @@
+# Build trees and fetched dependencies
+build/
+build-*/
+_deps/
+.cache/
+
+# Diversion workspace marker (machine-specific) and AI/agent scratch
+.diversion/
+.remember/
+.claude/
+
+# Internal working notes stay in Diversion, not on the git mirror
+Notes.md
+SESSION_HANDOFF.md
+UI_AUDIT.md
+
+.DS_Store
+
+# Diversion workspace marker and AI/agent scratch
+.diversion/
+.remember/
