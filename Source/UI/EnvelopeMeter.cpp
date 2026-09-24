@@ -88,9 +88,10 @@ void EnvelopeMeter::paint (juce::Graphics& g)
     // Sustain hold line in dim -- a hint on the phosphor screen, so the screen's own faint-grid
     // token rather than a silkscreen caption colour.
     g.setColour (pal::gridLine.withAlpha (0.8f));
+    const float sustainDashes[] = { 2.0f, 2.0f }; // MSVC rejects a C-style compound literal here
     g.drawDashedLine (juce::Line<float> (pxFor (aMs + d1Ms + d2Ms), yFor (sLvl),
                                          pxFor (aMs + d1Ms + d2Ms + sustainHold), yFor (sLvl)),
-                     (const float[]) { 2.0f, 2.0f }, 2);
+                     sustainDashes, 2);
 }
 
 } // namespace sk4n_ui

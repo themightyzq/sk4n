@@ -7,6 +7,11 @@ endif()
 
 project(SK4n VERSION 0.2.0 LANGUAGES C CXX)
 
+# MSVC does not expose M_PI from <cmath> unless asked; the DSP headers use it.
+if(MSVC)
+    add_compile_definitions(_USE_MATH_DEFINES)
+endif()
+
 # Enable CTest for test registration
 enable_testing()
 
