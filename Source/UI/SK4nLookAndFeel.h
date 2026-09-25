@@ -3,7 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <zqsfx_ui/zqsfx_ui.h>
 
-// SK4n now shares the ZQ SFX house look (../../docs/ZQSFX_UI_STYLE_GUIDE.md). `sk4n_ui::pal`
+// SK4n now shares the ZQ SFX house UI style (zqsfx_ui module). `sk4n_ui::pal`
 // stays the single colour source for SK4n's own code (project rule, CLAUDE.md) -- every name
 // below is unchanged so no call site elsewhere needed to know about the migration -- but every
 // value is now a direct alias of a house token instead of an independent literal, so the two can

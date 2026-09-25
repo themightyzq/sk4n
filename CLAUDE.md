@@ -60,8 +60,8 @@ must be meta too, or `auval -v aufx Sk4n ZQSF` fails with "Meta Param Flag is NO
 Re-run auval after touching the layout, the macros, or the morpher.
 
 ## UI (house look, adopted 2026-09-21)
-SK4n uses the ZQ SFX house UI (shared `zqsfx_ui`, fetched by tag in CMakeLists.txt; spec
-../docs/ZQSFX_UI_STYLE_GUIDE.md; details in `docs/ui_migration_report.md`). `SK4nLookAndFeel` is a
+SK4n uses the ZQ SFX house UI style (zqsfx_ui module), fetched by tag in CMakeLists.txt.
+`SK4nLookAndFeel` is a
 thin subclass of `zqsfx::ui::LookAndFeel`; `sk4n_ui::pal` stays the single colour source and its
 values alias house tokens. Module colours are the colour-blind-safe channels: osc A sky, osc B
 yellow, envelope purple, LFO green, feedback white, each also named by its section title. Orange is
@@ -121,8 +121,8 @@ Soundminer requires the system path: `sudo cp -R build/SK4n_artefacts/Release/VS
 
 ## Version control
 
-Diversion only (`.diversion/` present at project root). There is no `.git`
-directory in this project — do not initialize one or run git commands here.
+Diversion is the working VCS; this git repository is the curated public mirror
+(github.com/themightyzq/sk4n), updated with finished work only.
 
 ## Project-specific rules
 

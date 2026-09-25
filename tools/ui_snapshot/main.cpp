@@ -6,8 +6,8 @@
 //                                                         pass (kEditorW-100) (getCompactHeight()-60)
 //                                                         to check the minimum resize floor)
 //
-// The look-and-feel regression gate for the ZQ SFX house-UI migration (see
-// ../../../docs/ZQSFX_UI_STYLE_GUIDE.md and ../../docs/ui_migration_report.md): render before a
+// The look-and-feel regression gate for the ZQ SFX house UI style (zqsfx_ui module):
+// render before a
 // UI change, render after, compare. Mirrors Project_Lfl0w's lflow_ui_snapshot (which itself
 // mirrors the sibling Broken plugin's ui snapshot tool), but SK4n never calls juce_generate_juce_header
 // and never includes a generated JuceHeader.h -- every SK4n source includes JUCE module headers
