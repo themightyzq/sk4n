@@ -469,6 +469,28 @@ void SK4nAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     triggerFiredFlag.store  (false, std::memory_order_relaxed);
 }
 
+void SK4nAudioProcessor::resetDspState()
+{
+    // Allocation-free: every reset() below only clears existing storage in place.
+    circBuffer.reset();
+    positionEngine.reset (pCoarsePos != nullptr
+                              ? pCoarsePos->load() * static_cast<float> (circBuffer.getActiveSize())
+                              : 0.0f);
+    oscA.reset();  oscB.reset();
+    readerA.reset();  readerB.reset();
+    tunedDelay.reset();
+    filter8p.reset();
+    cabinetL.reset();  cabinetR.reset();
+    echoFlanger.reset();
+    reverbStage.reset();
+    envA.reset();  envB.reset();  ampEnv.reset();
+    transientDet.reset();
+    lfo.reset();
+    lastMasterMono = 0.0f;
+    envsReleased = true;
+    freeRunSamplesLeft = 0;
+}
+
 float SK4nAudioProcessor::effectiveLfoRateHz()
 {
     if (pLfoSync != nullptr && pLfoSync->load() >= 0.5f)
@@ -605,6 +627,18 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     auto* L = audioBuffer.getWritePointer (0);
     auto* R = numChans > 1 ? audioBuffer.getWritePointer (1) : L;
 
+    // Input scrub: a non-finite host sample must never reach the circular buffer, the feedback
+    // path or any filter/delay state (one NaN/Inf would latch them until re-prepare). Runs before
+    // the dry snapshot so the dry path is clean too. Finite input passes through untouched.
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (! std::isfinite (L[i])) L[i] = 0.0f;
+        if (! std::isfinite (R[i])) R[i] = 0.0f;
+    }
+
+    // Set when the wet path produced a non-finite value from internal state (overflow etc.).
+    bool wetPathTainted = false;
+
     // Snapshot dry stereo
     drySnapshot.setSize (2, numSamples, false, false, true);
     drySnapshot.copyFrom (0, 0, L, numSamples);
@@ -629,7 +663,8 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     {
         const float dryL = L[i];
         const float dryR = R[i];
-        const float monoIn = 0.5f * (dryL + dryR);
+        float monoIn = 0.5f * (dryL + dryR);
+        if (! std::isfinite (monoIn)) monoIn = 0.0f;   // finite L+R can still overflow to Inf
 
         circBuffer.writeSample (monoIn);
 
@@ -806,10 +841,19 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
         wetL *= ampGain;
         wetR *= ampGain;
 
+        // Scrub before the values reach the wet buffer, the reverb, or the feedback memory.
+        if (! std::isfinite (wetL) || ! std::isfinite (wetR))
+        {
+            wetL = 0.0f;
+            wetR = 0.0f;
+            wetPathTainted = true;
+        }
+
         wL[i] = wetL;
         wR[i] = wetR;
 
         lastMasterMono = (wetL + wetR) * 0.5f;
+        if (! std::isfinite (lastMasterMono)) lastMasterMono = 0.0f;   // wetL + wetR overflow
 
         lastEnvAVal = envAVal; lastEnvBVal = envBVal; lastAmpEnvVal = ampEnvVal; lastLfoVal = lfoVal;
         const float windowSamples = window * static_cast<float> (circBuffer.getActiveSize()) * 0.25f;
@@ -818,6 +862,12 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     }
 
     // ---- Block-rate Reverb ----
+    // The reverb stage reads one value per block, so advance each smoother across the block
+    // first; getCurrentValue() alone never moves (nothing else steps these four smoothers).
+    smReverbSize .skip (numSamples);
+    smReverbLoCut.skip (numSamples);
+    smReverbHiCut.skip (numSamples);
+    smReverbMix  .skip (numSamples);
     reverbStage.processBlock (wL, wR, numSamples,
                               smReverbSize.getCurrentValue(),
                               smReverbLoCut.getCurrentValue(),
@@ -837,9 +887,25 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
         float w_l = sk4n::SoftClipper::process (wL[i] * gainLin);
         float w_r = sk4n::SoftClipper::process (wR[i] * gainLin);
 
-        L[i] = dL[i] + dryWet * (w_l - dL[i]);
-        R[i] = dR[i] + dryWet * (w_r - dR[i]);
+        float outL = dL[i] + dryWet * (w_l - dL[i]);
+        float outR = dR[i] + dryWet * (w_r - dR[i]);
+
+        // Never hand a non-finite sample to the host; flag it so the state is rebuilt below.
+        if (! std::isfinite (outL) || ! std::isfinite (outR))
+        {
+            outL = 0.0f;
+            outR = 0.0f;
+            wetPathTainted = true;
+        }
+
+        L[i] = outL;
+        R[i] = outR;
     }
+
+    // A non-finite value appeared somewhere in the wet path (or the reverb's own state), so
+    // stateful DSP may hold NaN/Inf that would otherwise latch. Rebuild it from silence.
+    if (wetPathTainted)
+        resetDspState();
 
     lastReadPosA.store (lastPosA, std::memory_order_relaxed);
     lastReadPosB.store (lastPosB, std::memory_order_relaxed);

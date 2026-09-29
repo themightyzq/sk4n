@@ -102,6 +102,7 @@ private:
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void cacheParameterPointers();
     float effectiveLfoRateHz();
+    void resetDspState();   // clears all stateful DSP in place (NaN/Inf recovery); no allocation
 
     // -------- DSP --------
     sk4n::CircularBuffer    circBuffer;

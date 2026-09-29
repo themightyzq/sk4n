@@ -8,6 +8,7 @@
 #include "../Source/DSP/PositionEngine.h"
 #include "../Source/DSP/ADBDSREnvelope.h"
 #include "../Source/DSP/SoftClipper.h"
+#include "../Source/PluginProcessor.h"
 
 #include <cmath>
 
@@ -188,6 +189,150 @@ public:
     }
 };
 
+
+// Drives the real processor headlessly. Both cases here were silent defects: the four Reverb
+// controls were never advanced after prepare, and one NaN sample latched the plugin.
+class ProcessorTests : public juce::UnitTest
+{
+public:
+    ProcessorTests() : juce::UnitTest ("SK4nProcessor") {}
+
+    static constexpr int kBlock = 256;
+
+    static void setParam (SK4nAudioProcessor& p, const juce::String& id, float v)
+    {
+        auto* prm = p.apvts.getParameter (id);
+        jassert (prm != nullptr);
+        prm->setValueNotifyingHost (prm->convertTo0to1 (v));
+    }
+
+    // Deterministic broadband-ish stimulus, identical for every call with the same phase.
+    static void fillStimulus (juce::AudioBuffer<float>& b, int& sampleCounter)
+    {
+        for (int i = 0; i < b.getNumSamples(); ++i, ++sampleCounter)
+        {
+            const float t = static_cast<float> (sampleCounter);
+            const float v = 0.4f * std::sin (0.05f * t) + 0.2f * std::sin (0.31f * t + 1.0f);
+            b.setSample (0, i, v);
+            b.setSample (1, i, v);
+        }
+    }
+
+    static bool allFinite (const juce::AudioBuffer<float>& b)
+    {
+        for (int c = 0; c < b.getNumChannels(); ++c)
+            for (int i = 0; i < b.getNumSamples(); ++i)
+                if (! std::isfinite (b.getSample (c, i))) return false;
+        return true;
+    }
+
+    static double sumSquaredDiff (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+    {
+        double d = 0.0;
+        for (int c = 0; c < a.getNumChannels(); ++c)
+            for (int i = 0; i < a.getNumSamples(); ++i)
+            {
+                const double e = static_cast<double> (a.getSample (c, i)) - b.getSample (c, i);
+                d += e * e;
+            }
+        return d;
+    }
+
+    static void prepareProcessor (SK4nAudioProcessor& p)
+    {
+        p.setPlayConfigDetails (2, 2, 48000.0, kBlock);
+        p.prepareToPlay (48000.0, kBlock);
+    }
+
+    void runTest() override
+    {
+        beginTest ("Reverb Mix change is audible (smoothers advance)");
+        {
+            // Two identical processors fed identical audio; only the second gets Reverb Mix = 1
+            // after a few blocks. Before the fix the reverb stage read a smoother that never
+            // moved, so both outputs stayed identical forever.
+            SK4nAudioProcessor a, b;
+            for (auto* p : { &a, &b })
+            {
+                setParam (*p, "reverbMix", 0.0f);
+                setParam (*p, "reverbSize", 0.9f);
+                setParam (*p, "sampleMix", 1.0f);
+                setParam (*p, "dryWet", 1.0f);
+                setParam (*p, "coarsePos", 0.02f);
+                prepareProcessor (*p);
+            }
+
+            juce::AudioBuffer<float> ba (2, kBlock), bb (2, kBlock);
+            juce::MidiBuffer midi;
+            int ca = 0, cb = 0;
+
+            for (int blk = 0; blk < 6; ++blk)
+            {
+                fillStimulus (ba, ca); fillStimulus (bb, cb);
+                a.processBlock (ba, midi); b.processBlock (bb, midi);
+            }
+            expectWithinAbsoluteError (sumSquaredDiff (ba, bb), 0.0, 1.0e-12);
+
+            setParam (b, "reverbMix", 1.0f);
+
+            double diff = 0.0;
+            for (int blk = 0; blk < 12; ++blk)
+            {
+                fillStimulus (ba, ca); fillStimulus (bb, cb);
+                a.processBlock (ba, midi); b.processBlock (bb, midi);
+                diff += sumSquaredDiff (ba, bb);
+            }
+            expect (diff > 1.0e-4, "output should change after Reverb Mix 0 -> 1, diff = " + juce::String (diff));
+        }
+
+        beginTest ("NaN input does not latch the plugin");
+        {
+            SK4nAudioProcessor p;
+            setParam (p, "sampleMix", 1.0f);
+            setParam (p, "dryWet", 1.0f);
+            setParam (p, "fbAmount", 0.8f);   // exercise the feedback path
+            setParam (p, "fbSource", 1.0f);
+            setParam (p, "reverbMix", 0.5f);
+            setParam (p, "coarsePos", 0.02f);
+            prepareProcessor (p);
+
+            juce::AudioBuffer<float> buf (2, kBlock);
+            juce::MidiBuffer midi;
+            int c = 0;
+            for (int blk = 0; blk < 4; ++blk) { fillStimulus (buf, c); p.processBlock (buf, midi); }
+            expect (allFinite (buf), "warm-up output finite");
+
+            fillStimulus (buf, c);
+            buf.setSample (0, 10, std::numeric_limits<float>::quiet_NaN());
+            buf.setSample (1, 20, std::numeric_limits<float>::infinity());
+            p.processBlock (buf, midi);
+            expect (allFinite (buf), "block containing NaN/Inf must not output non-finite samples");
+
+            bool recovered = false;
+            for (int blk = 0; blk < 4 && ! recovered; ++blk)
+            {
+                buf.clear();
+                p.processBlock (buf, midi);
+                recovered = allFinite (buf);
+            }
+            expect (recovered, "output returns to finite after non-finite input");
+
+            // And it keeps working afterwards: stimulus in -> finite, non-silent stimulus out.
+            float peak = 0.0f;
+            for (int blk = 0; blk < 8; ++blk)
+            {
+                fillStimulus (buf, c);
+                p.processBlock (buf, midi);
+                expect (allFinite (buf), "post-recovery output finite");
+                peak = std::max (peak, buf.getMagnitude (0, kBlock));
+            }
+            expect (peak > 1.0e-4f, "plugin still produces sound after non-finite input");
+        }
+    }
+};
+
+static ProcessorTests        t_proc;
+
 static CircularBufferTests   t_cb;
 static PhaseOscillatorTests  t_po;
 static EightPoleFilterTests  t_8p;
@@ -197,6 +342,7 @@ static SoftClipperTests      t_sc;
 
 int main (int /*argc*/, char** /*argv*/)
 {
+    juce::ScopedJuceInitialiser_GUI gui;   // the processor's APVTS/UI helpers need a message manager
     juce::UnitTestRunner runner;
     runner.setAssertOnFailure (false);
     runner.runAllTests();

@@ -197,9 +197,11 @@ juce_add_console_app(SK4nTests
     PRODUCT_NAME "SK4nTests"
 )
 
+# The tests link the plugin's own shared-code target ("SK4n", produced by juce_add_plugin) so
+# they can construct the real SK4nAudioProcessor (and its DSP) instead of recompiling the DSP
+# sources a second time; same pattern as sk4n_ui_snapshot above.
 target_sources(SK4nTests PRIVATE
     Tests/Tests.cpp
-    ${SK4N_DSP_SOURCES}
 )
 
 target_compile_definitions(SK4nTests PRIVATE
@@ -211,10 +213,15 @@ target_include_directories(SK4nTests PRIVATE Source)
 
 target_link_libraries(SK4nTests
     PRIVATE
+        SK4n
         juce::juce_audio_basics
         juce::juce_audio_utils
+        juce::juce_audio_processors
         juce::juce_dsp
         juce::juce_core
+        juce::juce_gui_basics
+        juce::juce_gui_extra
+        zqsfx::ui
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
