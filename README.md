@@ -8,9 +8,13 @@ Standalone.
 
 ## Install
 
-There are no packaged releases yet; build from source (below), then copy
-the bundles into place. They are ad-hoc signed, which most hosts accept on
+Binary releases are available for download from the
+[v0.2.0 release](https://github.com/themightyzq/sk4n/releases/tag/v0.2.0)
+(SK4n-macOS-VST3.zip, SK4n-macOS-AU-Standalone.zip, SK4n-Windows-VST3.zip,
+SK4n-Linux-VST3.zip). They are ad-hoc signed, which most hosts accept on
 your own machine.
+
+Alternatively, build from source (below) and copy the bundles into place.
 
 User level (most hosts):
 
