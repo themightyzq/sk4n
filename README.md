@@ -9,7 +9,7 @@ Standalone.
 ## Install
 
 Binary releases are available for download from the
-[v0.2.0 release](https://github.com/themightyzq/sk4n/releases/tag/v0.2.0)
+[v0.2.1 release](https://github.com/themightyzq/sk4n/releases/tag/v0.2.1)
 (SK4n-macOS-VST3.zip, SK4n-macOS-AU-Standalone.zip, SK4n-Windows-VST3.zip,
 SK4n-Linux-VST3.zip). They are ad-hoc signed, which most hosts accept on
 your own machine.
