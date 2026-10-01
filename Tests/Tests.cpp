@@ -11,6 +11,7 @@
 #include "../Source/PluginProcessor.h"
 
 #include <cmath>
+#include <cstdio>
 
 // ---------------------------------------------------------------------------------------------
 // Allocation probe (test binary only). Counts heap allocations made by the *calling thread*
@@ -22,6 +23,15 @@
 // executable (on macOS, forwarding to the default malloc zone). The Plug-in code and JUCE are
 // statically linked into this executable, so their calls resolve to these definitions. A probe
 // self-test proves the counter sees both operator new and AudioBuffer growth.
+//
+// Per platform:
+//   macOS          counts operator new AND malloc/calloc/realloc (kProbeCountsMalloc == true).
+//   Linux, Windows count operator new ONLY. Interposing malloc is not portable there (glibc and
+//                  the MSVC CRT do not let an executable replace it the way the macOS zone
+//                  forwarding does), so JUCE's HeapBlock/AudioBuffer growth is invisible. These
+//                  platforms therefore make no "no allocation" claim: the zero-allocation test is
+//                  relabelled "operator new" and the malloc self-test expectation is skipped.
+//                  Real-time allocation freedom is proven on macOS only.
 // ---------------------------------------------------------------------------------------------
 #include <atomic>
 #include <cstdlib>
@@ -32,6 +42,12 @@
 
 namespace alloc_probe
 {
+#if defined (__APPLE__)
+    static constexpr bool kProbeCountsMalloc = true;
+#else
+    static constexpr bool kProbeCountsMalloc = false;
+#endif
+
     // Constant-initialised thread_local PODs: touching them never allocates.
     static thread_local bool armed = false;
     static thread_local long count = 0;
@@ -488,7 +504,8 @@ public:
 
     void runTest() override
     {
-        beginTest ("allocation probe sees new and malloc-based growth");
+        beginTest (alloc_probe::kProbeCountsMalloc ? "allocation probe sees new and malloc-based growth"
+                                                   : "allocation probe sees operator new (malloc not counted on this platform)");
         {
             alloc_probe::Scope scope;
             volatile float* v = new float[1024];
@@ -501,7 +518,10 @@ public:
             const long afterBuffer = scope.allocations();
 
             expect (afterNew >= 1, "operator new must be counted");
-            expect (afterBuffer > afterNew, "AudioBuffer growth (malloc) must be counted");
+            if (alloc_probe::kProbeCountsMalloc)
+                expect (afterBuffer > afterNew, "AudioBuffer growth (malloc) must be counted");
+            else
+                logMessage ("malloc interposition is macOS-only: AudioBuffer growth is not counted here");
         }
 
         beginTest ("4096-sample block into a 512 preparation matches eight 512 blocks");
@@ -516,7 +536,8 @@ public:
             expect (d <= 1.0e-6, "max abs difference = " + juce::String (d));
         }
 
-        beginTest ("oversized and undersized host blocks do not allocate");
+        beginTest (alloc_probe::kProbeCountsMalloc ? "oversized and undersized host blocks do not allocate"
+                                                   : "oversized and undersized host blocks do not call operator new (malloc not counted)");
         {
             SK4nAudioProcessor p;
             configure (p);
@@ -563,7 +584,18 @@ static SoftClipperTests      t_sc;
 int main (int /*argc*/, char** /*argv*/)
 {
     juce::ScopedJuceInitialiser_GUI gui;   // the processor's APVTS/UI helpers need a message manager
-    juce::UnitTestRunner runner;
+    // JUCE's default runner logs through juce::Logger, which on Windows goes to the debugger only,
+    // so a CI failure there prints nothing. Mirror every message to stderr so the log shows why.
+    struct StderrRunner : juce::UnitTestRunner
+    {
+        void logMessage (const juce::String& m) override
+        {
+            juce::UnitTestRunner::logMessage (m);
+           #if JUCE_WINDOWS
+            std::fprintf (stderr, "%s\n", m.toRawUTF8());
+           #endif
+        }
+    } runner;
     runner.setAssertOnFailure (false);
     runner.runAllTests();
 
