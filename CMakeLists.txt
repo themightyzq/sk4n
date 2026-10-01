@@ -5,7 +5,7 @@ if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS Universal Binary architectures")
 endif()
 
-project(SK4n VERSION 0.2.1 LANGUAGES C CXX)
+project(SK4n VERSION 0.3.0 LANGUAGES C CXX)
 
 # MSVC does not expose M_PI from <cmath> unless asked; the DSP headers use it.
 if(MSVC)
