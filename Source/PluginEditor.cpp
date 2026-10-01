@@ -16,6 +16,20 @@ constexpr int kPerfRowH           = 110;
 constexpr int kDisclosureRowH     = 28;
 constexpr int kPad                = 6;
 constexpr int kRowGap             = 6;
+constexpr int kPanelGap           = 8;    // gap between disclosure panels (both directions)
+
+// Everything above and below the morpher/disclosure region when a disclosure is open:
+// padding, header, CPU row, buffer + gap, gap, performance row, disclosure bar, gap.
+constexpr int kOpenChromeH        = 2 * kPad + kHeaderH + kHeaderRowGap + kCpuRowH + kBufferH
+                                  + kRowGap + kRowGap + kPerfRowH + kDisclosureRowH + kRowGap;
+constexpr int kMaxOpenH           = 760;  // tallest default window with a disclosure open: fits ~1280x800
+constexpr int kMorpherMinH        = 200;  // below this the morpher is hidden to give the panels room
+constexpr int kMorpherMaxH        = 380;
+constexpr int kScrollBarW         = 22;   // house minimum hit target
+
+// SectionPanel chrome: header + vertical padding, and accent bar + horizontal padding.
+constexpr int kPanelChromeH       = sk4n_ui::SectionPanel::kHeaderH + 2 * sk4n_ui::SectionPanel::kContentPadY;
+constexpr int kPanelChromeW       = sk4n_ui::SectionPanel::kAccentBarW + 2 * sk4n_ui::SectionPanel::kContentPadX;
 
 // Natural "card" height for a knob of the given tier (matches
 // KnobControl::resized math: 13 label + 4 gap + diam + 4 gap + 13 value).
@@ -23,6 +37,16 @@ int naturalCardH (KnobSize s)
 {
     return 13 + 4 + diameterFor (s) + 4 + 13;
 }
+
+// Pitch knob card plus the live Hz caption KnobControl::setAuxText adds below it (4 gap + 11).
+inline int oscPitchCardH()    { return naturalCardH (KnobSize::Medium) + 4 + 11; }
+
+// Narrowest content widths of the disclosure panels (each is the widest row the panel's layout
+// lambda places, plus kPanelChromeW). See flowItemsFor().
+constexpr int kEnvW        = 278;   // 4 knobs of 58 + 3 gaps of 6, plus panel chrome
+constexpr int kTriggerW    = 295;   // Thresh, Free, Rate, fire dot
+constexpr int kLfoOneRowW  = 612;   // eight LFO controls in a single row
+constexpr int kPositionW   = 665;   // Coarse Pos beside the seven secondary controls
 
 // Centered, max-width-constrained version of layoutRow. Useful when a row's
 // natural content is narrower than the panel: instead of letting items spread
@@ -89,6 +113,78 @@ std::pair<juce::Rectangle<int>, juce::Rectangle<int>> splitH2 (juce::Rectangle<i
     auto left  = band.removeFromLeft (band.getWidth() / 2 - gap / 2);
     band.removeFromLeft (gap);
     return { left, band };
+}
+
+// Lays the items out left to right, wrapping to a new row when the next item's minimum width
+// does not fit. Each row is as tall as its tallest column; the extra width of a row is shared
+// equally between its items, and `extraH` (spare height) is shared equally between rows. Returns
+// the natural height (without extraH). With apply == false nothing is moved.
+template <typename Item>
+int flowLayout (const std::vector<Item>& items, int width, int gap, int extraH, bool apply)
+{
+    struct Row { size_t first, last; int h; };
+    std::vector<Row> rows;
+
+    for (size_t i = 0; i < items.size();)
+    {
+        Row r { i, i, 0 };
+        int used = 0;
+        while (r.last < items.size())
+        {
+            const int w = juce::jmin (items[r.last].minW, width);
+            const int need = used + (r.last > r.first ? gap : 0) + w;
+            if (r.last > r.first && need > width) break;
+            used = need;
+            const int n = (int) items[r.last].stack.size();
+            r.h = juce::jmax (r.h, n * items[r.last].h + (n - 1) * gap);
+            ++r.last;
+        }
+        rows.push_back (r);
+        i = r.last;
+    }
+
+    int natural = 0;
+    for (auto& r : rows) natural += r.h;
+    if (! rows.empty()) natural += gap * ((int) rows.size() - 1);
+
+    if (apply && ! rows.empty())
+    {
+        const int extraEach = juce::jmax (0, extraH) / (int) rows.size();
+        const int extraLast = juce::jmax (0, extraH) - extraEach * (int) rows.size();
+        int y = 0;
+        for (size_t ri = 0; ri < rows.size(); ++ri)
+        {
+            const auto& r = rows[ri];
+            const int rowH = r.h + extraEach + (ri + 1 == rows.size() ? extraLast : 0);
+            const int count = (int) (r.last - r.first);
+
+            int used = gap * (count - 1);
+            for (size_t k = r.first; k < r.last; ++k) used += juce::jmin (items[k].minW, width);
+            const int spare = juce::jmax (0, width - used);
+
+            int x = 0, given = 0;
+            for (size_t k = r.first; k < r.last; ++k)
+            {
+                const bool lastInRow = (k + 1 == r.last);
+                const int share = lastInRow ? spare - given : spare / count;
+                given += share;
+                const int w = juce::jmin (items[k].minW, width) + share;
+
+                const int n = (int) items[k].stack.size();
+                const int each = (rowH - (n - 1) * gap) / n;
+                int py = y;
+                for (int j = 0; j < n; ++j)
+                {
+                    const int ph = (j + 1 == n) ? (y + rowH - py) : each;
+                    items[k].stack[(size_t) j]->setBounds (x, py, w, ph);
+                    py += ph + gap;
+                }
+                x += w + gap;
+            }
+            y += rowH + gap;
+        }
+    }
+    return natural;
 }
 
 } // namespace
@@ -208,6 +304,20 @@ SK4nAudioProcessorEditor::SK4nAudioProcessorEditor (SK4nAudioProcessor& p)
         lfo.panel.get(), trigger.panel.get(), master.panel.get()
     };
 
+    // The section panels were built as children of the editor; move them into the scrolling
+    // disclosure viewport (addChildComponent removes a component from its previous parent).
+    for (auto* panel : allSectionPanels)
+        if (panel != nullptr) disclosureContent.addChildComponent (*panel);
+
+    disclosureViewport.setViewedComponent (&disclosureContent, false);
+    disclosureViewport.setScrollBarsShown (true, false);          // vertical only
+    disclosureViewport.setScrollBarThickness (kScrollBarW);
+    disclosureViewport.setTitle ("Section controls");
+    disclosureViewport.setDescription ("Scrollable controls for the open section.");
+    disclosureViewport.setHasFocusOutline (true);
+    addChildComponent (disclosureViewport);
+    juce::Desktop::getInstance().addFocusChangeListener (this);
+
     hideAllSectionPanels();
 
     // Restore which disclosure was open, persisted as a plain ValueTree property on the APVTS
@@ -237,6 +347,11 @@ SK4nAudioProcessorEditor::SK4nAudioProcessorEditor (SK4nAudioProcessor& p)
         initW = storedW;
         initH = storedH;
     }
+    // Sessions saved before the disclosure viewport existed stored the old auto-grown height
+    // (up to 1244 px), which does not fit a 13-inch screen; a disclosure never opens taller
+    // than kMaxOpenH by itself.
+    if (openDisclosure != Disclosure::None)
+        initH = juce::jmin (initH, kMaxOpenH);
 
     setSize (initW, initH);
     setResizable (true, true);
@@ -262,30 +377,80 @@ SK4nAudioProcessorEditor::SK4nAudioProcessorEditor (SK4nAudioProcessor& p)
 
 SK4nAudioProcessorEditor::~SK4nAudioProcessorEditor()
 {
+    juce::Desktop::getInstance().removeFocusChangeListener (this);
     setLookAndFeel (nullptr);
 }
 
 int SK4nAudioProcessorEditor::getCompactHeight() const  { return kCompactH; }
 
-int SK4nAudioProcessorEditor::contentHeightFor (Disclosure d) const
+// Panels with a fixed content layout report their natural height here; the flow layout
+// (flowLayout above) stacks them into rows at the viewport width. All of this is derived from
+// the same numbers the panels' own layout lambdas use, so a panel is never given less room than
+// its content needs.
+std::vector<SK4nAudioProcessorEditor::FlowItem>
+SK4nAudioProcessorEditor::flowItemsFor (Disclosure d, int width) const
 {
-    // Pass 10: panels now lay out at natural row heights, and most "Tiny" knobs
-    // were promoted to Small. Bumped disclosure heights to keep the larger
-    // panels comfortable without clipping.
+    auto P = [] (const EditorSection& s) -> juce::Component* { return s.panel.get(); };
+
     switch (d)
     {
-        case Disclosure::Advanced:   return 540;
-        case Disclosure::Modulation: return 470;
-        case Disclosure::Filter:     return 320;
-        case Disclosure::Oscillators: return 300;
-        case Disclosure::FX:         return 320;
-        default:                     return 300;
+        case Disclosure::Oscillators:
+            // Pitch (Medium + Hz readout) row, then the Small row.
+            return { { { P (oscA) }, 330, kPanelChromeH + oscPitchCardH() + 8 + naturalCardH (KnobSize::Small) },
+                     { { P (oscB) }, 330, kPanelChromeH + oscPitchCardH() + 8 + naturalCardH (KnobSize::Small) } };
+
+        case Disclosure::Filter:
+            // Mode switch + response display (>= 128) + one knob row.
+            return { { { P (filter) }, 520, kPanelChromeH + 30 + 10 + 128 + 12 + naturalCardH (KnobSize::Small) } };
+
+        case Disclosure::FX:
+            // Mode switch + two knob rows.
+            return { { { P (echoFlg) }, 380, kPanelChromeH + 30 + 10 + 2 * naturalCardH (KnobSize::Small) + 10 } };
+
+        case Disclosure::Modulation:
+        {
+            // Envelope: 2 knob rows + shape + live meter. LFO: one row of eight controls when it
+            // has the width for it (kLfoOneRowW), otherwise two rows. Trigger: one row + meter.
+            const int envH = kPanelChromeH + 2 * naturalCardH (KnobSize::Small) + 8 + 6 + 28 + 4 + 12 + 2;
+            const int oneRowH = kPanelChromeH + naturalCardH (KnobSize::Small) + 6 + 14;
+            const int twoRowH = kPanelChromeH + 2 * naturalCardH (KnobSize::Small) + 8 + 6 + 14;
+            const int lfoWideW = kLfoOneRowW + kPanelChromeW;
+            const bool wide = width >= lfoWideW + kPanelGap + kTriggerW;
+            return { { { P (envA) },    kEnvW, envH },
+                     { { P (envB) },    kEnvW, envH },
+                     { { P (ampEnv) },  kEnvW, envH },
+                     { { P (lfo) },     wide ? lfoWideW : 345, wide ? oneRowH : twoRowH },
+                     { { P (trigger) }, kTriggerW, oneRowH } };
+        }
+
+        case Disclosure::Advanced:
+        {
+            const int small = kPanelChromeH + naturalCardH (KnobSize::Small);
+            return { { { P (position) },                kPositionW, kPanelChromeH + naturalCardH (KnobSize::Large)
+                                                                     + 8 + naturalCardH (KnobSize::Tiny) },
+                     { { P (mixer), P (master) },       291, small },
+                     { { P (am) },                      245, small },
+                     { { P (delay) },                   391, small },
+                     { { P (reverb) },                  291, small } };
+        }
+
+        case Disclosure::None: break;
     }
+    return {};
+}
+
+int SK4nAudioProcessorEditor::naturalContentHeight (Disclosure d, int width) const
+{
+    return flowLayout (flowItemsFor (d, width), width, kPanelGap, 0, false);
 }
 
 int SK4nAudioProcessorEditor::getExpandedHeight() const
 {
-    return kCompactH + kRowGap + contentHeightFor (openDisclosure);
+    // Chrome + the open panels' natural height, but never taller than a 13-inch screen holds:
+    // beyond kMaxOpenH the panels scroll inside their viewport instead of growing the window.
+    const int width = (getWidth() > 0 ? getWidth() : kEditorW) - 2 * kPad;
+    const int wanted = kOpenChromeH + naturalContentHeight (openDisclosure, width);
+    return juce::jlimit (getCompactHeight() - 60, kMaxOpenH, wanted);
 }
 
 void SK4nAudioProcessorEditor::hideAllSectionPanels()
@@ -315,10 +480,37 @@ void SK4nAudioProcessorEditor::setDisclosure (Disclosure d)
     processorRef.apvts.state.setProperty ("ui_disclosure", (int) d, nullptr);
 
     // Resize to whichever expanded height this disclosure needs (or back to compact).
+    disclosureViewport.setViewPosition (0, 0);
     setSize (getWidth(),
              d == Disclosure::None ? getCompactHeight() : getExpandedHeight());
 
     resized();
+}
+
+void SK4nAudioProcessorEditor::setDisclosureScroll (int y)
+{
+    disclosureViewport.setViewPosition (0, juce::jmax (0, y));
+}
+
+int SK4nAudioProcessorEditor::getDisclosureScrollRange() const
+{
+    return juce::jmax (0, disclosureContent.getHeight() - disclosureViewport.getHeight());
+}
+
+// Keyboard users tab through the controls in the scrolling viewport; bring the focused one into
+// view, otherwise focus could land on a knob that is scrolled out of sight.
+void SK4nAudioProcessorEditor::globalFocusChanged (juce::Component* focused)
+{
+    if (focused == nullptr || ! disclosureContent.isParentOf (focused)) return;
+
+    const auto r   = disclosureContent.getLocalArea (focused, focused->getLocalBounds());
+    const auto vis = disclosureViewport.getViewArea();
+    constexpr int margin = 6;
+
+    if (r.getY() < vis.getY())
+        disclosureViewport.setViewPosition (vis.getX(), juce::jmax (0, r.getY() - margin));
+    else if (r.getBottom() > vis.getBottom())
+        disclosureViewport.setViewPosition (vis.getX(), r.getBottom() - vis.getHeight() + margin);
 }
 
 void SK4nAudioProcessorEditor::toggleHelp()
@@ -340,7 +532,7 @@ void SK4nAudioProcessorEditor::layoutHelpOverlay()
     std::vector<HelpOverlay::Item> items;
     auto add = [&] (const juce::String& l, juce::Component* c)
     {
-        if (c == nullptr) return;
+        if (c == nullptr || ! c->isVisible()) return;   // e.g. the morpher while a disclosure is open
         const auto r = getLocalArea (c, c->getLocalBounds());
         items.push_back ({ l, r });
     };
@@ -495,28 +687,30 @@ void SK4nAudioProcessorEditor::buildPosition()
 
     position.panel->setLayout ([=] (juce::Rectangle<int> bounds)
     {
-        // Fixed-height rows = each row's natural knob card height. The rows
-        // pack tight against each other; any remaining vertical space sits as
-        // intentional padding above and below.
-        const int row1 = naturalCardH (KnobSize::Large);   // Coarse Pos
-        const int row2 = naturalCardH (KnobSize::Small);   // Buffer/Freeze/Fine/...
-        const int row3 = naturalCardH (KnobSize::Small);   // mod amounts
+        // Two rows (was three, which made this the tallest panel in the editor):
+        //   row 1: Coarse Pos | Buffer, Freeze, Fine Pos, Fine Rng, Speed, Range, Window
+        //   row 2: the five modulation amounts
+        // Each row is its natural knob-card height; spare height pads above and below.
+        const int row1 = naturalCardH (KnobSize::Large);
+        const int row2 = naturalCardH (KnobSize::Small);    // secondary controls, centred in row 1
+        const int row3 = naturalCardH (KnobSize::Tiny);     // mod amounts
         const int gap  = 8;
 
-        const int total = row1 + gap + row2 + gap + row3;
-        const int top   = juce::jmax (0, (bounds.getHeight() - total) / 2);
-        bounds.removeFromTop (top);
+        const int total = row1 + gap + row3;
+        bounds.removeFromTop (juce::jmax (0, (bounds.getHeight() - total) / 2));
 
         auto r1 = bounds.removeFromTop (row1); bounds.removeFromTop (gap);
-        auto r2 = bounds.removeFromTop (row2); bounds.removeFromTop (gap);
         auto r3 = bounds.removeFromTop (row3);
 
-        coarse->setBounds (r1.withSizeKeepingCentre (150, row1));
+        constexpr int coarseW = 120, groupGap = 24, secondaryW = 492;
+        auto group = r1.withSizeKeepingCentre (juce::jmin (r1.getWidth(), coarseW + groupGap + secondaryW), row1);
+        coarse->setBounds (group.removeFromLeft (coarseW));
+        group.removeFromLeft (groupGap);
 
-        layoutRowCentered (r2, {
-            { bufLen, 64 }, { freeze, 80 }, { finePos, 64 }, { fineRng, 64 },
-            { speed, 64 }, { range, 90 }, { window, 64 }
-        }, 8, 640);
+        layoutRowCentered (group.withSizeKeepingCentre (group.getWidth(), row2), {
+            { bufLen, 60 }, { freeze, 72 }, { finePos, 60 }, { fineRng, 60 },
+            { speed, 60 }, { range, 84 }, { window, 60 }
+        }, 6, secondaryW);
 
         layoutRowCentered (r3, {
             { modKnobs[0], 70 }, { modKnobs[1], 70 }, { modKnobs[2], 70 },
@@ -554,7 +748,7 @@ void SK4nAudioProcessorEditor::buildOscA()
 
     oscA.panel->setLayout ([=] (juce::Rectangle<int> bounds)
     {
-        const int row1 = naturalCardH (KnobSize::Medium);  // Pitch is Medium
+        const int row1 = oscPitchCardH();  // Pitch is Medium, with its live Hz caption
         const int row2 = naturalCardH (KnobSize::Small);
         const int gap  = 8;
         const int total = row1 + gap + row2;
@@ -602,7 +796,7 @@ void SK4nAudioProcessorEditor::buildOscB()
 
     oscB.panel->setLayout ([=] (juce::Rectangle<int> bounds)
     {
-        const int row1 = naturalCardH (KnobSize::Medium);
+        const int row1 = oscPitchCardH();
         const int row2 = naturalCardH (KnobSize::Small);
         const int gap  = 8;
         const int total = row1 + gap + row2;
@@ -645,7 +839,7 @@ void SK4nAudioProcessorEditor::buildMixer()
         bounds.removeFromTop (top);
         auto row = bounds.removeFromTop (rowH);
         layoutRowCentered (row, {
-            { sample, 68 }, { amM, 68 }, { delayM, 68 }, { filtM, 68 }
+            { sample, 60 }, { amM, 60 }, { delayM, 60 }, { filtM, 60 }
         }, 8, 320);
     });
 }
@@ -672,8 +866,8 @@ void SK4nAudioProcessorEditor::buildAM()
         bounds.removeFromTop (top);
         auto row = bounds.removeFromTop (rowH);
         layoutRowCentered (row, {
-            { blend, 80 }, { sq, 80 }, { mix, 80 }
-        }, 12, 320);
+            { blend, 64 }, { sq, 70 }, { mix, 64 }
+        }, 8, 320);
     });
 }
 
@@ -698,9 +892,9 @@ void SK4nAudioProcessorEditor::buildDelay()
 
     delay.panel->setLayout ([=] (juce::Rectangle<int> bounds)
     {
-        layoutRow (bounds, {
-            { tune, 64 }, { fb, 44 }, { lfoT, 44 }, { envT, 44 }, { loCut, 44 }, { mix, 44 }
-        }, 3);
+        layoutRowCentered (bounds, {
+            { tune, 64 }, { fb, 56 }, { lfoT, 56 }, { envT, 56 }, { loCut, 56 }, { mix, 56 }
+        }, 4, 364);
     });
 }
 
@@ -878,7 +1072,7 @@ void SK4nAudioProcessorEditor::buildReverb()
         bounds.removeFromTop (top);
         auto row = bounds.removeFromTop (rowH);
         layoutRowCentered (row, {
-            { size, 68 }, { loC, 68 }, { hiC, 68 }, { mix, 68 }
+            { size, 60 }, { loC, 60 }, { hiC, 60 }, { mix, 60 }
         }, 8, 320);
     });
 }
@@ -952,15 +1146,16 @@ void SK4nAudioProcessorEditor::buildEnv (EditorSection& s, const juce::String& t
         bounds.removeFromTop (gap);
         auto row2 = bounds.removeFromTop (knobH);
 
+        // 58 px cards, 6 px gaps: four of them are 250 px, the width kEnvW budgets for.
         layoutRowCentered (row1, {
-            { aK, 60 }, { d1K, 60 }, { brK, 60 }, { d2K, 60 }
-        }, 8, 280);
+            { aK, 58 }, { d1K, 58 }, { brK, 58 }, { d2K, 58 }
+        }, 6, 280);
 
         std::vector<std::pair<juce::Component*, int>> bottom {
-            { sK, 60 }, { rK, 60 }, { velK, 60 }
+            { sK, 58 }, { rK, 58 }, { velK, 58 }
         };
-        if (depthKnob != nullptr) bottom.push_back ({ depthKnob, 60 });
-        layoutRowCentered (row2, bottom, 8, 280);
+        if (depthKnob != nullptr) bottom.push_back ({ depthKnob, 58 });
+        layoutRowCentered (row2, bottom, 6, 280);
 
         if (shape->isVisible())
         {
@@ -1006,24 +1201,38 @@ void SK4nAudioProcessorEditor::buildLfo()
         const int meterH = 14;
         const int rowH   = naturalCardH (KnobSize::Small);
         const int gap    = 8;
-        const int totalNeeded = rowH * 2 + gap + 6 + meterH;
+
+        // All eight controls fit in one row when the panel is wide enough (kLfoOneRowW);
+        // otherwise two rows of four.
+        const bool oneRow = bounds.getWidth() >= kLfoOneRowW;
+        const int  rows   = oneRow ? 1 : 2;
+        const int totalNeeded = rowH * rows + gap * (rows - 1) + 6 + meterH;
         const bool meterFits = bounds.getHeight() >= totalNeeded;
         meter->setVisible (meterFits);
 
-        const int blockH = meterFits ? totalNeeded : (rowH * 2 + gap);
+        const int blockH = meterFits ? totalNeeded : (rowH * rows + gap * (rows - 1));
         const int topPad = juce::jmax (0, (bounds.getHeight() - blockH) / 2);
         bounds.removeFromTop (topPad);
 
         auto row1 = bounds.removeFromTop (rowH);
-        bounds.removeFromTop (gap);
-        auto row2 = bounds.removeFromTop (rowH);
-
-        layoutRowCentered (row1, {
-            { rate, 64 }, { shape, 80 }, { sync, 70 }, { div, 80 }
-        }, 8, 360);
-        layoutRowCentered (row2, {
-            { sym, 64 }, { phase, 64 }, { fade, 64 }, { keyS, 70 }
-        }, 8, 360);
+        if (oneRow)
+        {
+            layoutRowCentered (row1, {
+                { rate, 64 }, { shape, 80 }, { sync, 70 }, { div, 80 },
+                { sym, 64 }, { phase, 64 }, { fade, 64 }, { keyS, 70 }
+            }, 8, kLfoOneRowW);
+        }
+        else
+        {
+            bounds.removeFromTop (gap);
+            auto row2 = bounds.removeFromTop (rowH);
+            layoutRowCentered (row1, {
+                { rate, 64 }, { shape, 80 }, { sync, 70 }, { div, 80 }
+            }, 8, 360);
+            layoutRowCentered (row2, {
+                { sym, 64 }, { phase, 64 }, { fade, 64 }, { keyS, 70 }
+            }, 8, 360);
+        }
 
         if (meterFits)
         {
@@ -1096,8 +1305,8 @@ void SK4nAudioProcessorEditor::buildMaster()
         bounds.removeFromTop (top);
         auto row = bounds.removeFromTop (rowH);
         layoutRowCentered (row, {
-            { gain, 80 }, { dw, 80 }, { depth, 80 }
-        }, 12, 360);
+            { gain, 64 }, { dw, 64 }, { depth, 64 }
+        }, 8, 360);
     });
 }
 
@@ -1189,24 +1398,37 @@ void SK4nAudioProcessorEditor::resized()
     bufferDisplay->setBounds (bufferBounds);
     area.removeFromTop (kRowGap);
 
-    // Disclosure row (reserve at bottom of compact area)
-    int reservedBottom = kDisclosureRowH;
-    if (openDisclosure != Disclosure::None)
-        reservedBottom += kRowGap + contentHeightFor (openDisclosure);
+    // Vertical budget between the buffer display and the bottom edge, top to bottom:
+    //   morpher region | gap | performance row | disclosure bar | (open: gap | disclosure viewport)
+    // Closed, the morpher takes everything left over (as it always did). Open, the panels get the
+    // room first -- at their natural size if it fits, otherwise the viewport scrolls -- and the
+    // morpher keeps whatever is left, or is hidden when that is under kMorpherMinH.
+    const bool open = openDisclosure != Disclosure::None;
+    const int  belowMorpher = kRowGap + kPerfRowH + kDisclosureRowH + (open ? kRowGap : 0);
+    const int  avail = juce::jmax (0, area.getHeight() - belowMorpher);   // morpher + viewport
 
-    auto disclosureArea = area.removeFromBottom (reservedBottom);
-
-    // Performance row (above the disclosure area)
-    auto perfArea = area.removeFromBottom (kPerfRowH);
-    area.removeFromBottom (kRowGap);
-
-    // Morpher fills the remaining area between buffer and performance row.
+    int morpherRegionH = avail;
+    if (open)
     {
-        const int availW = area.getWidth();
-        const int availH = area.getHeight();
-        const int side   = juce::jmin (380, juce::jmin (availW, availH));
-        const int x = area.getX() + (availW - side) / 2;
-        const int y = area.getY() + (availH - side) / 2;
+        const int spare = avail - naturalContentHeight (openDisclosure, area.getWidth());
+        morpherRegionH = spare >= kMorpherMinH ? juce::jmin (spare, kMorpherMaxH) : 0;
+    }
+
+    auto morpherArea = area.removeFromTop (morpherRegionH);
+    area.removeFromTop (kRowGap);
+    auto perfArea = area.removeFromTop (kPerfRowH);
+    auto disclosureBar = area.removeFromTop (kDisclosureRowH);
+    if (open) area.removeFromTop (kRowGap);
+    auto viewportArea = area;   // empty when closed
+
+    // Morpher fills its region.
+    {
+        circularMorpher->setVisible (morpherRegionH > 0);
+        const int availW = morpherArea.getWidth();
+        const int availH = morpherArea.getHeight();
+        const int side   = juce::jmax (0, juce::jmin (kMorpherMaxH, juce::jmin (availW, availH)));
+        const int x = morpherArea.getX() + (availW - side) / 2;
+        const int y = morpherArea.getY() + (availH - side) / 2;
         circularMorpher->setBounds (x, y, side, side);
     }
 
@@ -1238,22 +1460,28 @@ void SK4nAudioProcessorEditor::resized()
         }
     }
 
-    // Disclosure row (5 bars across the bottom-disclosure-row band)
-    auto drBand = disclosureArea.removeFromTop (kDisclosureRowH);
-    const int drW = (drBand.getWidth() - 4 * 6) / 5;
-    int drx = drBand.getX();
-    for (auto& d : disclosures)
+    // Disclosure bar (5 buttons across one band)
     {
-        if (d != nullptr)
-            d->setBounds (drx, drBand.getY(), drW, drBand.getHeight());
-        drx += drW + 6;
+        const int drW = (disclosureBar.getWidth() - 4 * 6) / 5;
+        int drx = disclosureBar.getX();
+        for (auto& d : disclosures)
+        {
+            if (d != nullptr)
+                d->setBounds (drx, disclosureBar.getY(), drW, disclosureBar.getHeight());
+            drx += drW + 6;
+        }
     }
 
     // Disclosure content
-    if (openDisclosure != Disclosure::None)
+    disclosureViewport.setVisible (open);
+    if (open)
     {
-        disclosureArea.removeFromTop (kRowGap);
-        layoutDisclosureContent (disclosureArea);
+        disclosureViewport.setBounds (viewportArea);
+        layoutDisclosureContent (viewportArea.getWidth(), viewportArea.getHeight());
+    }
+    else
+    {
+        hideAllSectionPanels();
     }
 
     if (helpOverlay != nullptr && helpOverlay->isVisible())
@@ -1264,85 +1492,31 @@ void SK4nAudioProcessorEditor::resized()
     processorRef.setEditorSize (getWidth(), getHeight());
 }
 
-void SK4nAudioProcessorEditor::layoutDisclosureContent (juce::Rectangle<int> area)
+// Lays the open disclosure's panels out inside disclosureContent. If their natural height fits
+// the viewport they are stretched to fill it (no scrollbar); otherwise the content keeps its
+// natural height and the viewport scrolls. The scrollbar's width is reserved only when it is
+// needed, and the panels are re-flowed at the narrower width.
+void SK4nAudioProcessorEditor::layoutDisclosureContent (int viewportW, int viewportH)
 {
     hideAllSectionPanels();
-    auto show = [] (sk4n_ui::SectionPanel* p) { if (p) p->setVisible (true); };
+    if (openDisclosure == Disclosure::None) return;
 
-    switch (openDisclosure)
+    int w = viewportW;
+    int natural = naturalContentHeight (openDisclosure, w);
+    const bool scrolls = natural > viewportH;
+    if (scrolls)
     {
-        case Disclosure::Oscillators:
-        {
-            show (oscA.panel.get());
-            show (oscB.panel.get());
-            auto p = splitH2 (area, 8);
-            oscA.panel->setBounds (p.first);
-            oscB.panel->setBounds (p.second);
-            break;
-        }
-        case Disclosure::Filter:
-        {
-            show (filter.panel.get());
-            filter.panel->setBounds (area);
-            break;
-        }
-        case Disclosure::FX:
-        {
-            show (echoFlg.panel.get());
-            echoFlg.panel->setBounds (area);
-            break;
-        }
-        case Disclosure::Modulation:
-        {
-            show (envA.panel.get()); show (envB.panel.get()); show (ampEnv.panel.get());
-            show (lfo.panel.get());  show (trigger.panel.get());
-
-            // Row 1: envA | envB | ampEnv (taller -- needs the 2-knob-row + shape + meter)
-            // Row 2: lfo | trigger
-            const int row1H = area.getHeight() * 58 / 100;
-            const int row2H = area.getHeight() - row1H - 8;
-            auto r1 = area.removeFromTop (row1H);
-            area.removeFromTop (8);
-            auto r2 = area.removeFromTop (row2H);
-
-            const int colW = (r1.getWidth() - 2 * 6) / 3;
-            envA.panel  ->setBounds (r1.removeFromLeft (colW));
-            r1.removeFromLeft (6);
-            envB.panel  ->setBounds (r1.removeFromLeft (colW));
-            r1.removeFromLeft (6);
-            ampEnv.panel->setBounds (r1);
-
-            const int col2W = (r2.getWidth() - 6) / 2;
-            lfo.panel    ->setBounds (r2.removeFromLeft (col2W));
-            r2.removeFromLeft (6);
-            trigger.panel->setBounds (r2);
-            break;
-        }
-        case Disclosure::Advanced:
-        {
-            show (position.panel.get()); show (am.panel.get()); show (delay.panel.get());
-            show (mixer.panel.get());    show (master.panel.get()); show (reverb.panel.get());
-
-            // Position is tall (3 rows: Coarse / aux / mod) so give it ~58 % of
-            // the disclosure height. The smaller panels share the bottom row.
-            const int row1H = area.getHeight() * 58 / 100;
-            const int row2H = area.getHeight() - row1H - 8;
-            auto r1 = area.removeFromTop (row1H);
-            area.removeFromTop (8);
-            auto r2 = area.removeFromTop (row2H);
-
-            position.panel->setBounds (r1);
-
-            const int colW = (r2.getWidth() - 4 * 6) / 5;
-            am.panel    ->setBounds (r2.removeFromLeft (colW)); r2.removeFromLeft (6);
-            delay.panel ->setBounds (r2.removeFromLeft (colW)); r2.removeFromLeft (6);
-            mixer.panel ->setBounds (r2.removeFromLeft (colW)); r2.removeFromLeft (6);
-            master.panel->setBounds (r2.removeFromLeft (colW)); r2.removeFromLeft (6);
-            reverb.panel->setBounds (r2);
-            break;
-        }
-        case Disclosure::None: break;
+        w = viewportW - disclosureViewport.getScrollBarThickness();
+        natural = naturalContentHeight (openDisclosure, w);
     }
+
+    const auto items = flowItemsFor (openDisclosure, w);
+    for (auto& item : items)
+        for (auto* c : item.stack)
+            if (c != nullptr) c->setVisible (true);
+
+    disclosureContent.setSize (w, scrolls ? natural : viewportH);
+    flowLayout (items, w, kPanelGap, scrolls ? 0 : viewportH - natural, true);
 }
 
 void SK4nAudioProcessorEditor::timerCallback()

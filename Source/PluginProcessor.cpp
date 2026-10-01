@@ -34,6 +34,12 @@ SK4nAudioProcessor::SK4nAudioProcessor()
       randomizer (apvts)
 {
     cacheParameterPointers();
+
+    // Usable (allocation-free) even if a host processes before prepareToPlay; prepareToPlay
+    // re-sizes to the real samplesPerBlock.
+    wetBuffer  .setSize (2, preparedBlockSize);
+    drySnapshot.setSize (2, preparedBlockSize);
+
     morpher.attach (apvts, "snapshotA", "snapshotB", "morphPosition", "morphSpeed");
     morpher.populateDefaults();
 
@@ -347,6 +353,12 @@ bool SK4nAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
 
 void SK4nAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
+    // Every host block is processed in chunks of at most this many samples (see processBlock),
+    // so all block-sized scratch storage below is sized once, here, and never grows on the
+    // audio thread even when a host delivers a block larger than it prepared with.
+    samplesPerBlock = juce::jmax (1, samplesPerBlock);
+    preparedBlockSize = samplesPerBlock;
+
     circBuffer.prepare (sampleRate, 8);
     circBuffer.setActiveSeconds (pBufferLen != nullptr ? pBufferLen->load() : 2.0f);
 
@@ -522,7 +534,48 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     const auto blockStartTicks = juce::Time::getHighResolutionTicks();
     const int numSamples = audioBuffer.getNumSamples();
     const int numChans   = audioBuffer.getNumChannels();
-    if (numSamples <= 0) return;
+    if (numSamples <= 0 || numChans <= 0) return;
+
+    auto* L = audioBuffer.getWritePointer (0);
+    auto* R = numChans > 1 ? audioBuffer.getWritePointer (1) : L;
+
+    // A host may send a block larger than the samplesPerBlock given to prepareToPlay. Rather than
+    // growing the scratch buffers (a heap allocation on the audio thread) the block is processed
+    // as consecutive chunks of at most the prepared size. Block-rate stages (reverb parameters,
+    // position-engine offsets, smoother targets) therefore see exactly what they would see from
+    // a host that had delivered those smaller blocks, so the result is the same either way.
+    const int chunkMax = juce::jmax (1, preparedBlockSize);
+    for (int start = 0; start < numSamples; start += chunkMax)
+        processChunk (L + start, R + start, juce::jmin (chunkMax, numSamples - start));
+
+    // Output peak meters (decaying) -- once per host block, over the whole block.
+    {
+        float peakL = 0.0f, peakR = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            peakL = juce::jmax (peakL, std::fabs (L[i]));
+            peakR = juce::jmax (peakR, std::fabs (R[i]));
+        }
+        const float prevL = outputPeakL.load (std::memory_order_relaxed);
+        const float prevR = outputPeakR.load (std::memory_order_relaxed);
+        outputPeakL.store (juce::jmax (peakL, prevL * 0.85f), std::memory_order_relaxed);
+        outputPeakR.store (juce::jmax (peakR, prevR * 0.85f), std::memory_order_relaxed);
+    }
+
+    // CPU process load: how long this block took versus how long it had to be done in.
+    const auto blockEndTicks = juce::Time::getHighResolutionTicks();
+    const double elapsedSec  = juce::Time::highResolutionTicksToSeconds (blockEndTicks - blockStartTicks);
+    const double allowedSec  = (double) numSamples / juce::jmax (1.0, currentSampleRate);
+    const float  pct  = juce::jlimit (0.0f, 100.0f,
+                                       (float) (elapsedSec / juce::jmax (1.0e-9, allowedSec) * 100.0));
+    const float  prev = processLoadPercent.load (std::memory_order_relaxed);
+    processLoadPercent.store (prev * 0.9f + pct * 0.1f, std::memory_order_relaxed);
+}
+
+// Processes at most preparedBlockSize samples in place. L and R may be the same pointer (mono).
+void SK4nAudioProcessor::processChunk (float* L, float* R, int numSamples)
+{
+    jassert (numSamples > 0 && numSamples <= wetBuffer.getNumSamples());
 
     // ---- Block-rate updates ----
     circBuffer.setActiveSeconds (pBufferLen->load());
@@ -624,9 +677,6 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     smDryWet      .setTargetValue (pDryWet    ->load());
     smAmpEnvDepth .setTargetValue (pAmpEnvDepth->load());
 
-    auto* L = audioBuffer.getWritePointer (0);
-    auto* R = numChans > 1 ? audioBuffer.getWritePointer (1) : L;
-
     // Input scrub: a non-finite host sample must never reach the circular buffer, the feedback
     // path or any filter/delay state (one NaN/Inf would latch them until re-prepare). Runs before
     // the dry snapshot so the dry path is clean too. Finite input passes through untouched.
@@ -639,12 +689,11 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     // Set when the wet path produced a non-finite value from internal state (overflow etc.).
     bool wetPathTainted = false;
 
-    // Snapshot dry stereo
-    drySnapshot.setSize (2, numSamples, false, false, true);
+    // Snapshot dry stereo. Both scratch buffers were sized in prepareToPlay (>= numSamples);
+    // only the first numSamples of each are used, so nothing here resizes or allocates.
     drySnapshot.copyFrom (0, 0, L, numSamples);
     drySnapshot.copyFrom (1, 0, R, numSamples);
 
-    wetBuffer.setSize (2, numSamples, false, false, true);
     auto* wL = wetBuffer.getWritePointer (0);
     auto* wR = wetBuffer.getWritePointer (1);
 
@@ -916,29 +965,6 @@ void SK4nAudioProcessor::processBlock (juce::AudioBuffer<float>& audioBuffer, ju
     transientFollower.store (transientDet.currentFollower(), std::memory_order_relaxed);
     currentBlockSize  = numSamples;
     currentSampleRate = getSampleRate() > 0.0 ? getSampleRate() : currentSampleRate;
-
-    // Output peak meters (decaying)
-    {
-        float peakL = 0.0f, peakR = 0.0f;
-        for (int i = 0; i < numSamples; ++i)
-        {
-            peakL = juce::jmax (peakL, std::fabs (L[i]));
-            peakR = juce::jmax (peakR, std::fabs (R[i]));
-        }
-        const float prevL = outputPeakL.load (std::memory_order_relaxed);
-        const float prevR = outputPeakR.load (std::memory_order_relaxed);
-        outputPeakL.store (juce::jmax (peakL, prevL * 0.85f), std::memory_order_relaxed);
-        outputPeakR.store (juce::jmax (peakR, prevR * 0.85f), std::memory_order_relaxed);
-    }
-
-    // CPU process load: how long this block took versus how long it had to be done in.
-    const auto blockEndTicks = juce::Time::getHighResolutionTicks();
-    const double elapsedSec  = juce::Time::highResolutionTicksToSeconds (blockEndTicks - blockStartTicks);
-    const double allowedSec  = (double) numSamples / juce::jmax (1.0, currentSampleRate);
-    const float  pct  = juce::jlimit (0.0f, 100.0f,
-                                       (float) (elapsedSec / juce::jmax (1.0e-9, allowedSec) * 100.0));
-    const float  prev = processLoadPercent.load (std::memory_order_relaxed);
-    processLoadPercent.store (prev * 0.9f + pct * 0.1f, std::memory_order_relaxed);
 }
 
 juce::AudioProcessorEditor* SK4nAudioProcessor::createEditor()

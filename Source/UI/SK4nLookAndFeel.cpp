@@ -20,6 +20,11 @@ SK4nLookAndFeel::SK4nLookAndFeel()
     setColour (juce::ToggleButton::textColourId, pal::textSecondary);
     setColour (juce::ToggleButton::tickColourId, pal::accentPrimary);
 
+    // The disclosure viewport's scrollbar: a light thumb on the dark chassis (non-text contrast
+    // well above 3:1) with a panel-coloured track.
+    setColour (juce::ScrollBar::thumbColourId, pal::textSecondary);
+    setColour (juce::ScrollBar::trackColourId, pal::bgPanel);
+
     // Label backgrounds transparent (not a themed colour -- see ../../CLAUDE.md's own note on
     // this literal). Everything else about Label painting (font, text colour) comes from the
     // house LookAndFeel's own getLabelFont/drawLabel, or from getLabelFont below for the small

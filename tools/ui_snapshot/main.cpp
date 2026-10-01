@@ -1,6 +1,9 @@
 // sk4n_ui_snapshot: render the real plugin editor headlessly to a PNG.
 //
-//   sk4n_ui_snapshot <out.png> [scale] [width height]   (scale defaults to 2.0; width/height
+//   sk4n_ui_snapshot <out.png> [scale] [width height] [disclosure] [param=value ...] [scroll=N]
+//                                                        (scroll=N: scroll the open disclosure N px;
+//                                                         the tool prints "scroll Y of RANGE")
+//   (scale defaults to 2.0; width/height
 //                                                         default to the editor's own default
 //                                                         size, kEditorW x getCompactHeight() --
 //                                                         pass (kEditorW-100) (getCompactHeight()-60)
@@ -60,6 +63,8 @@ int main (int argc, char** argv)
         const auto id  = arg.upToFirstOccurrenceOf ("=", false, false).trim();
         const auto val = arg.fromFirstOccurrenceOf ("=", false, false).trim().getFloatValue();
 
+        if (id == "scroll") continue;   // editor view state, not a parameter; applied after layout below
+
         if (auto* p = processor.apvts.getParameter (id))
             p->setValueNotifyingHost (p->convertTo0to1 (val));
         else
@@ -105,6 +110,22 @@ int main (int argc, char** argv)
         const int h = juce::String (argv[4]).getIntValue();
         if (w > 0 && h > 0)
             editor->setSize (w, h); // clamped to the editor's own setResizeLimits() if out of range
+    }
+
+    // scroll=N scrolls the open disclosure's viewport N px down (clamped; scroll=9999 is the
+    // bottom). A disclosure taller than the window is scrolled, not clipped, so reading what is
+    // below the fold needs a second render at a scrolled position.
+    for (int i = 2; i < argc; ++i)
+    {
+        const juce::String arg (argv[i]);
+        if (! arg.startsWith ("scroll=")) continue;
+        if (auto* sk = dynamic_cast<SK4nAudioProcessorEditor*> (editor.get()))
+        {
+            const int range = sk->getDisclosureScrollRange();
+            const int y = juce::jlimit (0, range, arg.fromFirstOccurrenceOf ("=", false, false).getIntValue());
+            sk->setDisclosureScroll (y);
+            std::cout << "scroll " << y << " of " << range << "\n";
+        }
     }
 
     const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, scale);

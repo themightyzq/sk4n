@@ -27,7 +27,8 @@
 #include "UI/OutputMeter.h"
 
 class SK4nAudioProcessorEditor : public juce::AudioProcessorEditor,
-                                 private juce::Timer
+                                 private juce::Timer,
+                                 private juce::FocusChangeListener
 {
 public:
     explicit SK4nAudioProcessorEditor (SK4nAudioProcessor&);
@@ -49,8 +50,14 @@ public:
     // is how the Filter/FX overlapping-control-rows bug survived the whole house-UI migration.
     void setDisclosure (Disclosure d);
 
+    // Also for the headless UI gate: scrolls the open disclosure's viewport so content below the
+    // fold can be rendered and read (the content is scrolled, not clipped, when it does not fit).
+    void setDisclosureScroll (int y);
+    int  getDisclosureScrollRange() const;   // 0 when the open disclosure fits without scrolling
+
 private:
     void timerCallback() override;
+    void globalFocusChanged (juce::Component*) override;   // keeps keyboard focus visible in the viewport
 
     // Polls a std::function at its own Hz, independent of the editor's main 15 Hz UI timer
     // (used for the CPU-load readout, which the spec calls out as a 4 Hz update).
@@ -93,12 +100,22 @@ private:
 
     void buildPerformanceRow();
     void buildDisclosureRows();
-    void layoutDisclosureContent (juce::Rectangle<int> area);
+    void layoutDisclosureContent (int viewportW, int viewportH);
     void hideAllSectionPanels();
 
     int  getCompactHeight() const;
     int  getExpandedHeight() const;
-    int  contentHeightFor (Disclosure) const;
+
+    // One block of the disclosure flow layout: a column of one or more panels, the narrowest
+    // width at which their content is unclipped, and the natural height of each panel.
+    struct FlowItem
+    {
+        std::vector<juce::Component*> stack;
+        int minW = 0;
+        int h    = 0;
+    };
+    std::vector<FlowItem> flowItemsFor (Disclosure, int width) const;
+    int  naturalContentHeight (Disclosure, int width) const;
 
     void toggleHelp();
     void layoutHelpOverlay();
@@ -129,9 +146,13 @@ private:
     std::unique_ptr<sk4n_ui::KnobControl> kDryWet, kMasterGain;
     std::unique_ptr<sk4n_ui::OutputMeter> outputMeter;
 
-    // Disclosures
+    // Disclosures. Their section panels live in disclosureContent, which sits in a vertical-only
+    // viewport: the open panel set is laid out at its natural size and scrolls when the window
+    // is too short to show all of it (a 13-inch laptop screen cannot hold the editor otherwise).
     std::array<std::unique_ptr<sk4n_ui::DisclosureRow>, 5> disclosures;
     Disclosure openDisclosure = Disclosure::None;
+    juce::Viewport  disclosureViewport;
+    juce::Component disclosureContent;
 
     // All section panels (built once; visibility toggled per disclosure)
     EditorSection position, oscA, oscB, mixer, am, delay, filter, echoFlg, reverb;

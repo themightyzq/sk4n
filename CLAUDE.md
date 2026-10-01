@@ -29,10 +29,16 @@ not build against the macOS 15 SDK, hence the JUCE 8 pin.
 
 - `Source/PluginProcessor.{h,cpp}` — owns APVTS; `createLayout()` builds the
   100+ parameter tree.
-- `Source/PluginEditor.{h,cpp}` — editor; `contentHeightFor(Disclosure)`
-  drives DisclosureRow's variable-height layout (compact view resizes to
-  `compact + gap + contentHeightFor(openDisclosure)`; only one disclosure open
-  at a time).
+- `Source/PluginEditor.{h,cpp}` — editor. Only one disclosure is open at a time.
+  The 15 section panels live in `disclosureContent`, inside a vertical-only
+  `disclosureViewport`. `flowItemsFor(Disclosure, width)` gives each panel's
+  narrowest unclipped width and natural height; `flowLayout()` wraps them into
+  rows and `naturalContentHeight()` is the total. Opening a disclosure sizes the
+  window to `kOpenChromeH + natural`, capped at `kMaxOpenH` (760, fits a 13-inch
+  screen); anything taller scrolls in the viewport instead of growing the window.
+  The morpher gets only the room left over and is hidden under `kMorpherMinH`.
+  A panel's layout lambda must fit the width its `flowItemsFor` entry promises
+  (e.g. `kEnvW`, `kLfoOneRowW`, `kPositionW`): change both together.
 - `Source/DSP/` — engine: `CircularBuffer`, `PositionEngine`,
   `PhaseOscillator`, `SampleReader`, `TunedDelay`, `EightPoleFilter`,
   `Cabinet`, `EchoFlanger`, `ReverbStage`, `ADBDSREnvelope`,
@@ -67,13 +73,14 @@ values alias house tokens. Module colours are the colour-blind-safe channels: os
 yellow, envelope purple, LFO green, feedback white, each also named by its section title. Orange is
 "active" only; red is warn only. `KnobControl` / `ToggleControl` / `ChoiceControl` set accessible
 title + description centrally. The header mark is the About button. UI gate:
-`sk4n_ui_snapshot <out.png> [scale] [w h] [disclosure] [param=value ...]` renders the editor
-headlessly; render before and after any UI change (`docs/ui_before.png` / `ui_after.png`).
+`sk4n_ui_snapshot <out.png> [scale] [w h] [disclosure] [param=value ...] [scroll=N]` renders the editor
+headlessly (`scroll=9999` scrolls an overflowing disclosure to the bottom and prints the range); render before and after any UI change (`docs/ui_before.png` / `ui_after.png`).
 
 **Every disclosure starts collapsed, so a bare render shows none of the section panels** — which is
 how the Filter/FX overlapping-rows bug survived the entire house-UI migration. Pass a disclosure
 (`oscillators|filter|fx|modulation|advanced`) to expand one, and `param=value` to render a
-non-default state. A mode-switched panel needs **both** of its modes rendered to be considered
+non-default state. Render each disclosure at the minimum
+(`900 638`), default and maximum (`1400 1304`) sizes. A mode-switched panel needs **both** of its modes rendered to be considered
 checked, e.g.:
 
 ```sh

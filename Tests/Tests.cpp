@@ -12,6 +12,72 @@
 
 #include <cmath>
 
+// ---------------------------------------------------------------------------------------------
+// Allocation probe (test binary only). Counts heap allocations made by the *calling thread*
+// while a Scope is alive, so JUCE's timer/message threads cannot cause false positives.
+//
+// JUCE's juce::HeapBlock / juce::AudioBuffer allocate with malloc/realloc/calloc and never touch
+// operator new, so replacing operator new alone would miss exactly the allocations that matter
+// here. This translation unit therefore also defines malloc/calloc/realloc/free for the test
+// executable (on macOS, forwarding to the default malloc zone). The Plug-in code and JUCE are
+// statically linked into this executable, so their calls resolve to these definitions. A probe
+// self-test proves the counter sees both operator new and AudioBuffer growth.
+// ---------------------------------------------------------------------------------------------
+#include <atomic>
+#include <cstdlib>
+#include <new>
+#if defined (__APPLE__)
+ #include <malloc/malloc.h>
+#endif
+
+namespace alloc_probe
+{
+    // Constant-initialised thread_local PODs: touching them never allocates.
+    static thread_local bool armed = false;
+    static thread_local long count = 0;
+
+    static inline void note() noexcept { if (armed) ++count; }
+
+    struct Scope
+    {
+        Scope()  { count = 0; armed = true; }
+        ~Scope() { armed = false; }
+        long allocations() const { return count; }
+    };
+}
+
+#if defined (__APPLE__)
+extern "C"
+{
+    void* malloc (size_t n)               { alloc_probe::note(); return malloc_zone_malloc (malloc_default_zone(), n); }
+    void* calloc (size_t a, size_t b)     { alloc_probe::note(); return malloc_zone_calloc (malloc_default_zone(), a, b); }
+    void* realloc (void* p, size_t n)
+    {
+        alloc_probe::note();
+        return p != nullptr ? malloc_zone_realloc (malloc_zone_from_ptr (p), p, n)
+                            : malloc_zone_malloc (malloc_default_zone(), n);
+    }
+    void free (void* p)                   { if (p != nullptr) malloc_zone_free (malloc_zone_from_ptr (p), p); }
+}
+#endif
+
+void* operator new (std::size_t n)
+{
+    alloc_probe::note();
+    if (void* p = std::malloc (n != 0 ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void* operator new[] (std::size_t n)
+{
+    alloc_probe::note();
+    if (void* p = std::malloc (n != 0 ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete (void* p) noexcept                    { std::free (p); }
+void operator delete[] (void* p) noexcept                  { std::free (p); }
+void operator delete (void* p, std::size_t) noexcept       { std::free (p); }
+void operator delete[] (void* p, std::size_t) noexcept     { std::free (p); }
+
 class CircularBufferTests : public juce::UnitTest
 {
 public:
@@ -330,6 +396,160 @@ public:
         }
     }
 };
+
+
+// A host may deliver a block larger than the samplesPerBlock it prepared with (several hosts do,
+// e.g. offline bounce or a changed buffer size without a new prepare). The processor must handle
+// it without touching the heap and must treat it as consecutive prepared-size blocks.
+class OversizedBlockTests : public juce::UnitTest
+{
+public:
+    OversizedBlockTests() : juce::UnitTest ("SK4nOversizedBlocks") {}
+
+    static constexpr int kPrepared = 512;
+
+    static void setParam (SK4nAudioProcessor& p, const juce::String& id, float v)
+    {
+        auto* prm = p.apvts.getParameter (id);
+        jassert (prm != nullptr);
+        prm->setValueNotifyingHost (prm->convertTo0to1 (v));
+    }
+
+    static void fill (juce::AudioBuffer<float>& b, int startSample)
+    {
+        for (int i = 0; i < b.getNumSamples(); ++i)
+        {
+            const float t = static_cast<float> (startSample + i);
+            b.setSample (0, i, 0.4f * std::sin (0.05f * t) + 0.2f * std::sin (0.31f * t + 1.0f));
+            b.setSample (1, i, 0.3f * std::sin (0.07f * t + 0.5f));
+        }
+    }
+
+    // Every stateful stage is audible: reverb, echo, delay, filter, feedback, LFO, envelopes.
+    static void configure (SK4nAudioProcessor& p)
+    {
+        setParam (p, "sampleMix", 1.0f);
+        setParam (p, "dryWet", 0.8f);
+        setParam (p, "coarsePos", 0.02f);
+        setParam (p, "reverbMix", 0.4f);
+        setParam (p, "reverbSize", 0.7f);
+        setParam (p, "echoMix", 0.4f);
+        setParam (p, "echoFb", 0.4f);
+        setParam (p, "delayMix", 0.3f);
+        setParam (p, "filterMix", 0.5f);
+        setParam (p, "fbAmount", 0.3f);
+        setParam (p, "fbSource", 1.0f);
+        setParam (p, "freeRun", 1.0f);
+        p.setPlayConfigDetails (2, 2, 48000.0, kPrepared);
+        p.prepareToPlay (48000.0, kPrepared);
+    }
+
+    static double maxAbsDiff (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+    {
+        double m = 0.0;
+        for (int c = 0; c < a.getNumChannels(); ++c)
+            for (int i = 0; i < a.getNumSamples(); ++i)
+                m = std::max (m, std::fabs ((double) a.getSample (c, i) - (double) b.getSample (c, i)));
+        return m;
+    }
+
+    // Feeds `total` samples to `whole` as ONE host block and to `ref` as consecutive blocks of
+    // `refBlock` (the last one shorter if total is not a multiple). Returns the worst difference.
+    double compare (int total, int refBlock, int rounds)
+    {
+        SK4nAudioProcessor whole, ref;
+        configure (whole);
+        configure (ref);
+        juce::MidiBuffer midi;
+
+        double worst = 0.0;
+        int pos = 0;
+        for (int r = 0; r < rounds; ++r)
+        {
+            juce::AudioBuffer<float> big (2, total);
+            fill (big, pos);
+            whole.processBlock (big, midi);
+
+            juce::AudioBuffer<float> joined (2, total);
+            for (int start = 0; start < total; start += refBlock)
+            {
+                const int n = std::min (refBlock, total - start);
+                juce::AudioBuffer<float> blk (2, n);
+                fill (blk, pos + start);
+                ref.processBlock (blk, midi);
+                for (int c = 0; c < 2; ++c)
+                    joined.copyFrom (c, start, blk, c, 0, n);
+            }
+            worst = std::max (worst, maxAbsDiff (big, joined));
+            pos += total;
+        }
+        return worst;
+    }
+
+    void runTest() override
+    {
+        beginTest ("allocation probe sees new and malloc-based growth");
+        {
+            alloc_probe::Scope scope;
+            volatile float* v = new float[1024];
+            v[0] = 1.0f;
+            const long afterNew = scope.allocations();
+            delete[] const_cast<float*> (v);
+
+            juce::AudioBuffer<float> buf (2, 16);
+            buf.setSize (2, 100000, false, false, true);   // HeapBlock path: malloc, never operator new
+            const long afterBuffer = scope.allocations();
+
+            expect (afterNew >= 1, "operator new must be counted");
+            expect (afterBuffer > afterNew, "AudioBuffer growth (malloc) must be counted");
+        }
+
+        beginTest ("4096-sample block into a 512 preparation matches eight 512 blocks");
+        {
+            const double d = compare (4096, kPrepared, 3);
+            expect (d <= 1.0e-6, "max abs difference = " + juce::String (d));
+        }
+
+        beginTest ("non-multiple oversized block (1000 into 512) matches 512 + 488");
+        {
+            const double d = compare (1000, kPrepared, 3);
+            expect (d <= 1.0e-6, "max abs difference = " + juce::String (d));
+        }
+
+        beginTest ("oversized and undersized host blocks do not allocate");
+        {
+            SK4nAudioProcessor p;
+            configure (p);
+            juce::MidiBuffer midi;
+
+            juce::AudioBuffer<float> normal (2, kPrepared), big (2, 4096), small (2, 64), odd (2, 1000);
+            int pos = 0;
+            for (int i = 0; i < 4; ++i)   // warm-up at the prepared size only
+            {
+                fill (normal, pos); pos += kPrepared;
+                p.processBlock (normal, midi);
+            }
+
+            long worstBig = 0, worstSmall = 0, worstOdd = 0;
+            for (int rep = 0; rep < 3; ++rep)
+            {
+                fill (big, pos); pos += 4096;
+                { alloc_probe::Scope s; p.processBlock (big, midi); worstBig = std::max (worstBig, s.allocations()); }
+
+                fill (small, pos); pos += 64;
+                { alloc_probe::Scope s; p.processBlock (small, midi); worstSmall = std::max (worstSmall, s.allocations()); }
+
+                fill (odd, pos); pos += 1000;
+                { alloc_probe::Scope s; p.processBlock (odd, midi); worstOdd = std::max (worstOdd, s.allocations()); }
+            }
+            expectEquals (worstBig,   (long) 0);
+            expectEquals (worstSmall, (long) 0);
+            expectEquals (worstOdd,   (long) 0);
+        }
+    }
+};
+
+static OversizedBlockTests   t_oversized;
 
 static ProcessorTests        t_proc;
 

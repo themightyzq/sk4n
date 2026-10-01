@@ -103,6 +103,7 @@ private:
     void cacheParameterPointers();
     float effectiveLfoRateHz();
     void resetDspState();   // clears all stateful DSP in place (NaN/Inf recovery); no allocation
+    void processChunk (float* L, float* R, int numSamples);   // <= preparedBlockSize samples, in place
 
     // -------- DSP --------
     sk4n::CircularBuffer    circBuffer;
@@ -118,7 +119,11 @@ private:
     sk4n::TransientDetector transientDet;
     sk4n::GlobalLFO         lfo;
 
-    // Wet temp buffers
+    // Largest chunk processChunk() handles; set in prepareToPlay. processBlock splits any larger
+    // host block into chunks of this size so the scratch buffers below never need to grow.
+    int preparedBlockSize = 512;
+
+    // Wet temp buffers (sized to preparedBlockSize in prepareToPlay)
     juce::AudioBuffer<float> wetBuffer;
     juce::AudioBuffer<float> drySnapshot;
 
