@@ -4,6 +4,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <functional>
 
+#include <zqsfx_ui/zqsfx_ui.h>
+
 #include "SK4nLookAndFeel.h"
 #include "Randomizer.h"
 
@@ -27,9 +29,9 @@ inline int diameterFor (KnobSize s)
     return 52;
 }
 
-// A juce::Slider subclass that lets a parent intercept shift-click
-// (used for the lock toggle on KnobControl).
-class LockableSlider : public juce::Slider
+// A house Dial (keyboard focus, focus ring, Shift+arrow fine step) that also lets a parent
+// intercept shift-click (used for the lock toggle on KnobControl).
+class LockableSlider : public zqsfx::ui::Dial
 {
 public:
     std::function<bool (const juce::MouseEvent&)> shiftClickHandler;
@@ -38,7 +40,7 @@ public:
     {
         if (e.mods.isShiftDown() && shiftClickHandler && shiftClickHandler (e))
             return;
-        juce::Slider::mouseDown (e);
+        zqsfx::ui::Dial::mouseDown (e);
     }
 };
 
@@ -93,7 +95,6 @@ private:
     juce::String paramID;
     Randomizer*  randomizer = nullptr;
     bool         showName   = true;
-    bool         wasFocused = false;
     bool         locked     = false;
 };
 

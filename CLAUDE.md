@@ -72,7 +72,11 @@ thin subclass of `zqsfx::ui::LookAndFeel`; `sk4n_ui::pal` stays the single colou
 values alias house tokens. Module colours are the colour-blind-safe channels: osc A sky, osc B
 yellow, envelope purple, LFO green, feedback white, each also named by its section title. Orange is
 "active" only; red is warn only. `KnobControl` / `ToggleControl` / `ChoiceControl` set accessible
-title + description centrally. The header mark is the About button. UI gate:
+title + description centrally. Every parameter slider (`KnobControl`'s `LockableSlider`, the morph and
+speed sliders) is a `zqsfx::ui::Dial` followed by `zqsfx::ui::setDoubleClickDefault`, so it takes
+keyboard focus, steps on the arrow keys (Shift+arrow finer) and returns to the parameter default on
+double-click; a new slider must be one too, and the `SK4nEditorSliders` case in `Tests/Tests.cpp`
+fails otherwise. The header mark is the About button. UI gate:
 `sk4n_ui_snapshot <out.png> [scale] [w h] [disclosure] [param=value ...] [scroll=N]` renders the editor
 headlessly (`scroll=9999` scrolls an overflowing disclosure to the bottom and prints the range); render before and after any UI change (`docs/ui_before.png` / `ui_after.png`).
 

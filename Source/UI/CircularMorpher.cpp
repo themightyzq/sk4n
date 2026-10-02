@@ -13,6 +13,7 @@ CircularMorpher::CircularMorpher (SK4nAudioProcessor& p) : processor (p)
     addAndMakeVisible (speedSlider);
     speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.apvts, "morphSpeed", speedSlider);
+    zqsfx::ui::setDoubleClickDefault (speedSlider, processor.apvts, "morphSpeed");
 
     abLabel.setJustificationType (juce::Justification::centred);
     abLabel.setFont (font::value (11.0f));

@@ -9,6 +9,7 @@
 #include "../Source/DSP/ADBDSREnvelope.h"
 #include "../Source/DSP/SoftClipper.h"
 #include "../Source/PluginProcessor.h"
+#include "../Source/PluginEditor.h"
 
 #include <cmath>
 #include <cstdio>
@@ -572,7 +573,115 @@ public:
 
 static OversizedBlockTests   t_oversized;
 
+
+// Every parameter-bound slider in the editor must behave like a house control: a
+// zqsfx::ui::Dial (keyboard focus, focus ring, Shift+arrow fine step) whose double-click returns
+// it to the parameter's default. A slider has no public link to its parameter, so the editor is
+// built with every parameter at its default and each slider's value at that moment is the
+// default its double-click must restore.
+class EditorSliderTests : public juce::UnitTest
+{
+public:
+    EditorSliderTests() : juce::UnitTest ("SK4nEditorSliders") {}
+
+    static void collectSliders (juce::Component& c, juce::Array<juce::Slider*>& out)
+    {
+        for (auto* child : c.getChildren())
+        {
+            if (auto* s = dynamic_cast<juce::Slider*> (child))
+                out.add (s);
+            collectSliders (*child, out);
+        }
+    }
+
+    void runTest() override
+    {
+        beginTest ("every editor slider is a house Dial with a parameter-default double-click");
+
+        SK4nAudioProcessor processor;
+
+        // A new instance opens on the factory patch, and the performance macros and the morpher
+        // rewrite other parameters whenever they move, so put the meta parameters on their
+        // defaults first and every other parameter after them.
+        for (bool meta : { true, false })
+            for (auto* prm : processor.getParameters())
+                if (auto* r = dynamic_cast<juce::RangedAudioParameter*> (prm))
+                    if (r->isMetaParameter() == meta)
+                        r->setValueNotifyingHost (r->getDefaultValue());
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+        expect (editor != nullptr);
+        if (editor == nullptr) return;
+
+        juce::Array<juce::Slider*> sliders;
+        collectSliders (*editor, sliders);
+        logMessage ("editor sliders found: " + juce::String (sliders.size()));
+        expectGreaterThan (sliders.size(), 90);
+
+        // Moving a macro knob rewrites the sliders it drives, so take every default up front.
+        juce::Array<double> defaults;
+        for (auto* s : sliders)
+            defaults.add (s->getValue());
+
+        int notDial = 0, noFocus = 0, noReset = 0, wrongReset = 0, badKeys = 0, badFine = 0, badShiftKey = 0, badDoubleClick = 0;
+        for (int index = 0; index < sliders.size(); ++index)
+        {
+            auto* s = sliders.getUnchecked (index);
+            if (dynamic_cast<zqsfx::ui::Dial*> (s) == nullptr) ++notDial;
+            auto* dial = s;
+
+            if (! dial->getWantsKeyboardFocus()) ++noFocus;
+
+            const double def = defaults.getUnchecked (index);
+            if (! dial->isDoubleClickReturnEnabled()) { ++noReset; continue; }
+            if (std::abs (dial->getDoubleClickReturnValue() - def) > 1.0e-4 * juce::jmax (1.0, std::abs (dial->getMaximum())))
+            {
+                ++wrongReset;
+                logMessage ("double-click value " + juce::String (dial->getDoubleClickReturnValue()) + " vs default "
+                            + juce::String (def) + " on '" + dial->getTitle() + "'");
+            }
+
+            // Arrow keys move the value; Shift+arrow moves a continuous slider by a tenth of that.
+            const double mid = dial->getMinimum() + 0.4 * (dial->getMaximum() - dial->getMinimum());
+            dial->setValue (mid, juce::dontSendNotification);
+            dial->keyPressed (juce::KeyPress (juce::KeyPress::rightKey));
+            const double plainStep = dial->getValue() - mid;
+            if (! (plainStep > 0.0)) ++badKeys;
+
+            // Shift+arrow is the Dial's fine step: a plain slider does not handle it at all. A slider
+            // quantised to an interval snaps a tenth of a step back, so only a continuous one moves.
+            dial->setValue (mid, juce::dontSendNotification);
+            if (! dial->keyPressed (juce::KeyPress (juce::KeyPress::rightKey, juce::ModifierKeys::shiftModifier, 0)))
+                ++badShiftKey;
+            if (juce::approximatelyEqual (dial->getInterval(), 0.0))
+            {
+                const double fineStep = dial->getValue() - mid;
+                if (! (fineStep > 0.05 * plainStep && fineStep < 0.2 * plainStep)) ++badFine;
+            }
+
+            // A real double-click from a non-default value lands on the default.
+            dial->setValue (mid, juce::dontSendNotification);
+            const auto now = juce::Time::getCurrentTime();
+            dial->mouseDoubleClick (juce::MouseEvent (juce::Desktop::getInstance().getMainMouseSource(),
+                                                      juce::Point<float>(), juce::ModifierKeys(), 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                      dial, dial, now, juce::Point<float>(), now, 2, false));
+            if (std::abs (dial->getValue() - def) > 1.0e-4 * juce::jmax (1.0, std::abs (dial->getMaximum())))
+                ++badDoubleClick;
+        }
+
+        expectEquals (notDial, 0, "sliders that are not zqsfx::ui::Dial");
+        expectEquals (noFocus, 0, "sliders that refuse keyboard focus");
+        expectEquals (noReset, 0, "sliders without a double-click return value");
+        expectEquals (wrongReset, 0, "sliders whose double-click value is not the parameter default");
+        expectEquals (badKeys, 0, "sliders where an arrow key did not move the value");
+        expectEquals (badShiftKey, 0, "sliders that do not handle Shift+arrow");
+        expectEquals (badFine, 0, "continuous sliders where Shift+arrow was not about a tenth of the arrow step");
+        expectEquals (badDoubleClick, 0, "sliders where a double-click did not restore the default");
+    }
+};
+
 static ProcessorTests        t_proc;
+static EditorSliderTests     t_sliders;
 
 static CircularBufferTests   t_cb;
 static PhaseOscillatorTests  t_po;

@@ -39,7 +39,7 @@ private:
 
     SK4nAudioProcessor& processor;
 
-    juce::Slider speedSlider;
+    zqsfx::ui::Dial speedSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
     juce::Label  speedLabel;
     juce::Label  abLabel;

@@ -42,10 +42,10 @@ private:
     std::array<std::unique_ptr<SlotButton>, 8> slots;
     juce::Label slotsLabel;
 
-    juce::Slider morphSlider;
+    zqsfx::ui::Dial morphSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> morphAttach;
 
-    juce::Slider speedSlider;
+    zqsfx::ui::Dial speedSlider;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> speedAttach;
     juce::Label  speedLabel;
 

@@ -22,6 +22,7 @@ SnapshotRow::SnapshotRow (SK4nAudioProcessor& p) : processor (p)
     addAndMakeVisible (morphSlider);
     morphAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.apvts, "morphPosition", morphSlider);
+    zqsfx::ui::setDoubleClickDefault (morphSlider, processor.apvts, "morphPosition");
 
     speedSlider.setSliderStyle (juce::Slider::LinearHorizontal);
     speedSlider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
@@ -29,6 +30,7 @@ SnapshotRow::SnapshotRow (SK4nAudioProcessor& p) : processor (p)
     addAndMakeVisible (speedSlider);
     speedAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.apvts, "morphSpeed", speedSlider);
+    zqsfx::ui::setDoubleClickDefault (speedSlider, processor.apvts, "morphSpeed");
 
     speedLabel.setText ("Speed", juce::dontSendNotification);
     speedLabel.setJustificationType (juce::Justification::centredRight);

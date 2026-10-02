@@ -16,8 +16,6 @@ KnobControl::KnobControl (juce::AudioProcessorValueTreeState& apvts,
     slider.setRotaryParameters (juce::MathConstants<float>::pi * -0.75f,
                                 juce::MathConstants<float>::pi *  0.75f, true);
     slider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
-    slider.setWantsKeyboardFocus (true);
-    slider.setHasFocusOutline (true); // house LookAndFeel draws the ring; see paintOverChildren
     slider.addListener (this);
     addAndMakeVisible (slider);
 
@@ -63,6 +61,7 @@ KnobControl::KnobControl (juce::AudioProcessorValueTreeState& apvts,
     addAndMakeVisible (auxLabel);
 
     attach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (apvts, paramID, slider);
+    zqsfx::ui::setDoubleClickDefault (slider, apvts, paramID);
 
     const bool autoBipolar = (slider.getMinimum() < 0.0 && slider.getMaximum() > 0.0);
     slider.getProperties().set ("sk4n_fillStyle",
@@ -246,8 +245,8 @@ void KnobControl::paintOverChildren (juce::Graphics& g)
         g.strokePath (shackle, juce::PathStrokeType (1.2f));
     }
 
-    // No manual focus ring: slider.setHasFocusOutline(true) (ctor) plus the house LookAndFeel's
-    // createFocusOutlineForComponent now draw it automatically. Per the house's own contract,
+    // No manual focus ring: the Dial (focus outline on by default) plus the house LookAndFeel's
+    // createFocusOutlineForComponent draw it automatically. Per the house's own contract,
     // the ring hugs the SLIDER's bounds (the dial), not the whole label+knob+value card -- a
     // deliberate, slightly narrower ring than the old hand-drawn one; see ui_migration_report.md.
 }
@@ -257,8 +256,6 @@ void KnobControl::sliderValueChanged (juce::Slider*) { updateText(); }
 void KnobControl::timerCallback()
 {
     updateText();
-    const bool nowFocused = slider.hasKeyboardFocus (true);
-    if (nowFocused != wasFocused) { wasFocused = nowFocused; repaint(); }
 }
 
 void KnobControl::updateText()
